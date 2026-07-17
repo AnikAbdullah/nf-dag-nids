@@ -1,0 +1,60 @@
+[project]
+name = "caushap-nids"
+version = "0.1.0"
+description = "Causal Explainable AI for Autoencoder-Based Network Intrusion Detection"
+requires-python = ">=3.11"
+
+dependencies = [
+    "torch>=2.3",
+    "polars>=0.20",
+    "scikit-learn>=1.4",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "shap>=0.46",
+    "dice-ml>=0.11",
+    "pymoo>=0.6",
+    "networkx>=3.2",
+    "causal-learn>=0.1.3",
+    "rtamt>=0.3",
+    "mlflow>=2.13",
+    "hydra-core>=1.3",
+    "quantus>=0.5",
+    "hypothesis>=6",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "pyarrow>=16",
+    "jupyter>=1.0",
+    "ipykernel>=6.29",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+caushap-run = "caushap_nids.experiments.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/caushap_nids"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src/caushap_nids --cov-report=term-missing"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true

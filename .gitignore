@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.hypothesis/
+.coverage
+
+# Data & generated artifacts (regenerate via scripts/notebooks, not stored in git)
+data/
+artifacts/
+_handoff/
+
+# Large generated binaries (papers, slide decks, zips) — keep locally, not in git
+*.zip
+*.pdf
+*.pptx
+*.xlsx
+
+# Planning / handoff / status docs — not pushed to GitHub
+*.md
+plans/
+
+# Local-only Claude Code settings
+.claude/settings.local.json
