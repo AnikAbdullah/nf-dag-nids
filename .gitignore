@@ -22,6 +22,7 @@ _handoff/
 
 # Planning / handoff / status docs — not pushed to GitHub
 *.md
+!README.md
 plans/
 
 # Local-only Claude Code settings
