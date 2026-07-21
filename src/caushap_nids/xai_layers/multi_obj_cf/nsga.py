@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass, field
+
+import numpy as np
+import networkx as nx
+
+from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.core.mutation import Mutation
+from pymoo.core.problem import ElementwiseProblem
+from pymoo.core.sampling import Sampling
+from pymoo.operators.crossover.sbx import SBX
+from pymoo.operators.sampling.rnd import FloatRandomSampling
+from pymoo.optimize import minimize
+
+from .feasibility import dag_respecting_mutation
+from .objectives import feasibility as _feasibility
+from .objectives import proximity, sparsity
+from .objectives import validity as _validity
+
+
+@dataclass
+class CounterfactualExplanation:
+    x_orig: np.ndarray
+    x_cf: np.ndarray
+    validity: float
+    proximity: float
+    sparsity: int
+    feasibility_rate: float     # fraction of DAG edges satisfied (1.0 = fully feasible)
+    changed_features: list[str] = field(default_factory=list)
+
+
+class _DagMutation(Mutation):
+    """pymoo Mutation operator that propagates parent changes through the DAG."""
+
+    def __init__(self, dag: nx.DiGraph, feature_names: list[str], prob: float = 0.1):
+        super().__init__()
+        self._dag = dag
+        self._feature_names = feature_names
+        self._prob = prob
+
+    def _do(self, problem, X, **kwargs):
+        X = X.copy()
+        rng = np.random.default_rng()
+        for i in range(len(X)):
+            X[i] = dag_respecting_mutation(
+                X[i], self._dag, self._feature_names,
+                mutation_rate=self._prob, rng=rng,
+            )
+        return X
+
+
+def _soft_validity_obj(x_cf: np.ndarray, detector, threshold: float) -> float:
+    """Continuous validity objective for NSGA-II optimisation.
+    Returns 0 when benign (score < threshold), otherwise the normalised excess
+    (score - threshold) / threshold so the optimiser gets gradient signal rather
+    than a flat binary cliff.  The output CounterfactualExplanation.validity is
+    always recomputed as the binary value via _validity().
+    """
+    score = float(detector.score(np.asarray(x_cf, dtype=np.float64).reshape(1, -1))[0])
+    if score < threshold:
+        return 0.0
+    return (score - threshold) / max(threshold, 1e-9)
+
+
+class _CFProblem(ElementwiseProblem):
+    """4-objective NSGA-II problem: minimise [soft_validity, proximity, sparsity, feas_violations]."""
+
+    def __init__(self, x_orig, detector, dag, feature_names, threshold, xl, xu):
+        super().__init__(n_var=len(x_orig), n_obj=4, xl=xl, xu=xu)
+        self.x_orig = x_orig
+        self.detector = detector
+        self.dag = dag
+        self.feature_names = feature_names
+        self.threshold = threshold
+
+    def _evaluate(self, x_cf, out, *args, **kwargs):
+        v_soft = _soft_validity_obj(x_cf, self.detector, self.threshold)
+        p = proximity(self.x_orig, x_cf)
+        s = sparsity(self.x_orig, x_cf)
+        f = _feasibility(self.x_orig, x_cf, self.dag, self.feature_names)
+        out["F"] = [v_soft, p, s, f]
+
+
+class _WarmStartSampling(Sampling):
+    """
+    Initialise warm_frac of the population from actual background rows (clipped to bounds).
+    Gives NSGA-II a head-start inside the valid (benign) region of feature space so it
+    can find valid CFs without having to navigate there from scratch.
+    """
+
+    def __init__(self, background: np.ndarray, xl: np.ndarray, xu: np.ndarray, warm_frac: float = 0.3):
+        super().__init__()
+        self._background = np.clip(background, xl, xu)
+        self._xl = xl
+        self._xu = xu
+        self._warm_frac = warm_frac
+
+    def _do(self, problem, n_samples, **kwargs):
+        rng = np.random.default_rng()
+        n_warm = min(int(n_samples * self._warm_frac), len(self._background))
+        idx = rng.choice(len(self._background), size=n_warm, replace=False)
+        warm = self._background[idx].copy()
+        # Tiny noise so duplicates are eliminated cleanly.
+        warm += rng.normal(scale=1e-4, size=warm.shape)
+        warm = np.clip(warm, self._xl, self._xu)
+        n_uniform = n_samples - n_warm
+        uniform = rng.uniform(self._xl, self._xu, size=(n_uniform, problem.n_var))
+        return np.vstack([warm, uniform])
+
+
+def _binary_dominates(a: CounterfactualExplanation, b: CounterfactualExplanation) -> bool:
+    """Pareto dominance using binary validity (the externally-visible form)."""
+    obj_a = np.array([1.0 - a.validity, a.proximity, float(a.sparsity), 1.0 - a.feasibility_rate])
+    obj_b = np.array([1.0 - b.validity, b.proximity, float(b.sparsity), 1.0 - b.feasibility_rate])
+    return bool(np.all(obj_a <= obj_b) and np.any(obj_a < obj_b))
+
+
+def _prune_dominated(cfs: list[CounterfactualExplanation]) -> list[CounterfactualExplanation]:
+    """Remove solutions that are dominated in binary-validity space after soft-validity optimisation."""
+    non_dom = [
+        a for i, a in enumerate(cfs)
+        if not any(_binary_dominates(b, a) for j, b in enumerate(cfs) if j != i)
+    ]
+    return non_dom if non_dom else cfs   # fallback: never return empty
+
+
+def _as_cf_result(
+    x_orig: np.ndarray,
+    x_cf: np.ndarray,
+    detector,
+    dag: nx.DiGraph,
+    feature_names: list[str],
+    threshold: float,
+) -> CounterfactualExplanation:
+    v = _validity(x_cf, detector, threshold)
+    p = proximity(x_orig, x_cf)
+    s = int(round(sparsity(x_orig, x_cf)))
+    feas = 1.0 - _feasibility(x_orig, x_cf, dag, feature_names)
+    changed = [feature_names[i] for i in range(len(x_orig)) if abs(x_cf[i] - x_orig[i]) > 1e-6]
+    return CounterfactualExplanation(
+        x_orig=x_orig.copy(),
+        x_cf=x_cf.copy(),
+        validity=v,
+        proximity=p,
+        sparsity=s,
+        feasibility_rate=feas,
+        changed_features=changed,
+    )
+
+
+def _sparsify_valid_cf(
+    x_orig: np.ndarray,
+    x_cf: np.ndarray,
+    detector,
+    dag: nx.DiGraph,
+    feature_names: list[str],
+    threshold: float,
+) -> np.ndarray:
+    """Greedily remove unnecessary changes from a valid CF without hurting feasibility."""
+    current = np.asarray(x_cf, dtype=np.float64).copy()
+    x_orig = np.asarray(x_orig, dtype=np.float64)
+    if _validity(current, detector, threshold) < 1.0:
+        return current
+
+    max_violation = _feasibility(x_orig, current, dag, feature_names)
+
+    def _acceptable(candidate: np.ndarray) -> bool:
+        return (
+            _validity(candidate, detector, threshold) == 1.0
+            and _feasibility(x_orig, candidate, dag, feature_names) <= max_violation + 1e-12
+        )
+
+    changed = np.flatnonzero(np.abs(current - x_orig) > 1e-6)
+    for idx in sorted(changed, key=lambda i: abs(current[i] - x_orig[i])):
+        candidate = current.copy()
+        candidate[idx] = x_orig[idx]
+        if _acceptable(candidate):
+            current = candidate
+            max_violation = _feasibility(x_orig, current, dag, feature_names)
+
+    changed = np.flatnonzero(np.abs(current - x_orig) > 1e-6)
+    for idx in changed:
+        endpoint = float(current[idx])
+        lo, hi = 0.0, 1.0
+        best = current.copy()
+        for _ in range(10):
+            mid = (lo + hi) / 2.0
+            candidate = current.copy()
+            candidate[idx] = float(x_orig[idx]) + mid * (endpoint - float(x_orig[idx]))
+            if _acceptable(candidate):
+                best = candidate
+                hi = mid
+            else:
+                lo = mid
+        current = best
+
+    return current
+
+
+def generate_cf_pareto_front(
+    detector,
+    dag: nx.DiGraph,
+    x: np.ndarray,
+    feature_names: list[str],
+    target_class: int = 0,
+    *,
+    population_size: int = 100,
+    n_generations: int = 50,
+    seed: int = 42,
+    bounds: tuple[float, float] | tuple[np.ndarray, np.ndarray] = (-10.0, 10.0),
+    threshold: float | None = None,
+    background: np.ndarray | None = None,
+    warm_frac: float = 0.3,
+    return_valid_only: bool = False,
+    n_cfs: int | None = None,
+) -> list[CounterfactualExplanation]:
+    """
+    Main entry point for Layer B.
+    Returns the Pareto-optimal counterfactuals trading off validity, proximity,
+    sparsity, and DAG feasibility.
+    threshold is mandatory — pass the detector's operating decision threshold.
+    background: if provided, warm_frac of the initial population is seeded from
+        actual benign rows so NSGA-II starts inside the valid region.
+    """
+    if threshold is None:
+        raise ValueError(
+            "threshold must be provided. Use the detector's operating threshold "
+            "(the score value above which a flow is classified as attack)."
+        )
+
+    x = np.asarray(x, dtype=np.float64)
+    d = len(x)
+
+    if isinstance(bounds[0], (int, float)):
+        xl = np.full(d, float(bounds[0]))
+        xu = np.full(d, float(bounds[1]))
+    else:
+        xl = np.asarray(bounds[0], dtype=np.float64)
+        xu = np.asarray(bounds[1], dtype=np.float64)
+
+    if background is not None:
+        sampler = _WarmStartSampling(np.asarray(background, dtype=np.float64), xl, xu, warm_frac)
+    else:
+        sampler = FloatRandomSampling()
+
+    problem = _CFProblem(x, detector, dag, feature_names, threshold, xl, xu)
+    algorithm = NSGA2(
+        pop_size=population_size,
+        sampling=sampler,
+        crossover=SBX(prob=0.9, eta=15),
+        mutation=_DagMutation(dag, feature_names, prob=0.1),
+        eliminate_duplicates=True,
+    )
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="invalid value encountered in power",
+            category=RuntimeWarning,
+            module=r"pymoo\.operators\.crossover\.sbx",
+        )
+        res = minimize(problem, algorithm, ("n_gen", n_generations), seed=seed, verbose=False)
+
+    if res.X is None:
+        return []
+
+    X_sols = np.atleast_2d(res.X)
+    results: list[CounterfactualExplanation] = []
+
+    for x_cf in X_sols:
+        x_cf = _sparsify_valid_cf(x, x_cf, detector, dag, feature_names, threshold)
+        results.append(_as_cf_result(x, x_cf, detector, dag, feature_names, threshold))
+
+    if return_valid_only:
+        valid = [cf for cf in results if cf.validity == 1.0]
+        if valid:
+            results = valid
+
+    results = _prune_dominated(results)
+    if n_cfs is not None and n_cfs > 0:
+        results = sorted(
+            results,
+            key=lambda cf: (-cf.validity, -cf.feasibility_rate, cf.sparsity, cf.proximity),
+        )[:n_cfs]
+    return results
