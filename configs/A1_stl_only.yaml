@@ -1,0 +1,33 @@
+name: A1_stl_only
+description: "STL attack typing only — Vanilla KernelSHAP + Vanilla DiCE, no DAG"
+
+detector:
+  ae_hidden_dims: [64, 32, 16]
+  ae_dropout: 0.1
+  ae_lr: 3.0e-4
+  ae_epochs: 100
+  ae_batch_size: 2048
+  if_n_estimators: 300
+  if_max_samples: 10000
+  target_fpr: 0.01
+  ae_feature_selection: greedy_val
+  ae_feature_selection_max_features: 5
+  ae_feature_selection_top_candidates: 15
+  ae_alpha: auto
+  ae_alpha_grid: [0.0, 0.05, 0.1, 0.16, 0.25, 0.4, 0.6, 0.8, 1.0]
+
+shapley:
+  method: vanilla_kernel
+  n_samples: 200
+
+counterfactual:
+  method: vanilla_dice
+  n_cfs: 5
+
+attack_typing:
+  method: stl
+  stl_library: artifacts/stl_library.yaml
+  window_seconds: 60
+
+dag: null
+concepts: false

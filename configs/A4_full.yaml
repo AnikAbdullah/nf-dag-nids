@@ -1,0 +1,42 @@
+name: A4_full
+description: "Full system — Causal Shapley + Multi-obj CFs + Concept Abduction + STL + NF-DAG-v1"
+
+detector:
+  ae_hidden_dims: [64, 32, 16]
+  ae_dropout: 0.1
+  ae_lr: 3.0e-4
+  ae_epochs: 100
+  ae_batch_size: 2048
+  if_n_estimators: 300
+  if_max_samples: 10000
+  target_fpr: 0.01
+  ae_feature_selection: greedy_val
+  ae_feature_selection_max_features: 5
+  ae_feature_selection_top_candidates: 15
+  ae_alpha: auto
+  ae_alpha_grid: [0.0, 0.05, 0.1, 0.16, 0.25, 0.4, 0.6, 0.8, 1.0]
+
+shapley:
+  method: causal_interventional
+  n_samples: 200
+  causal_method: cc-shapley
+  stability_smoothing: 0.6
+
+counterfactual:
+  method: nsga2
+  population_size: 100
+  n_generations: 200
+  n_cfs: 10
+
+attack_typing:
+  method: stl
+  stl_library: artifacts/stl_library.yaml
+  window_seconds: 60
+
+dag:
+  path: artifacts/nf_dag_v1.graphml
+
+concepts:
+  use_gate_summary: true
+  target_fpr: 0.05
+  top_k: 3
