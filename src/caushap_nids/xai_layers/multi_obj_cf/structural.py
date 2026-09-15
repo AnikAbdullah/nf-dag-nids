@@ -153,6 +153,43 @@ def structural_violation(
     return violations / len(nodes)
 
 
+def structural_violation_batch(
+    x_orig: np.ndarray,
+    X_cf: np.ndarray,
+    sem: StructuralEquations,
+    *,
+    k_sigma: float = 2.0,
+) -> np.ndarray:
+    """Vectorised ``structural_violation`` over a population of counterfactuals.
+
+    Same result as calling ``structural_violation`` per row, but loops over the
+    ~34 non-root nodes instead of over the population, which is what makes the
+    NSGA-II inner loop affordable.  ``X_cf`` is (n_candidates, n_features).
+    """
+    nodes = sem.non_root_nodes
+    X_cf = np.atleast_2d(np.asarray(X_cf, dtype=np.float64))
+    if not nodes:
+        return np.zeros(len(X_cf))
+
+    x_orig = np.asarray(x_orig, dtype=np.float64)
+    idx = {f: i for i, f in enumerate(sem.feature_names)}
+    violations = np.zeros(len(X_cf))
+
+    for node in nodes:
+        i = idx[node]
+        pa_idx = [idx[p] for p in sem.parents[node]]
+        coef, b = sem.coef[node], sem.intercept[node]
+
+        pred_cf = X_cf[:, pa_idx] @ coef + b
+        dev_cf = np.abs(X_cf[:, i] - pred_cf)
+
+        tol = k_sigma * sem.resid_std[node]
+        dev_orig = abs(float(x_orig[i] - (x_orig[pa_idx] @ coef + b)))
+        violations += (dev_cf > tol) & (dev_cf > max(tol, dev_orig))
+
+    return violations / len(nodes)
+
+
 def structural_feasibility_rate(
     x_orig: np.ndarray,
     x_cf: np.ndarray,

@@ -46,11 +46,14 @@ def check_feasibility(
     dag: nx.DiGraph,
     feature_names: list[str],
 ) -> dict[str, bool]:
-    """
-    Return {edge_str: is_feasible} for every DAG edge.
+    """Return {edge_str: is_feasible} for every DAG edge (co-change criterion).
+
     An edge parent->child is feasible if both endpoints are unchanged or both
-    endpoints are changed.  Changing only one endpoint is structurally
-    inconsistent under the DAG.
+    endpoints are changed.
+
+    DEPRECATED for new work; see ``objectives.feasibility`` for why this
+    criterion is degenerate, and use ``structural.per_node_report`` for the
+    per-node causal-recourse diagnostic that replaces it.
     """
     x_orig = np.asarray(x_orig)
     x_cf = np.asarray(x_cf)

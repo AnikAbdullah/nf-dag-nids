@@ -17,6 +17,7 @@ from caushap_nids.xai_layers.multi_obj_cf.structural import (
     per_node_report,
     structural_feasibility_rate,
     structural_violation,
+    structural_violation_batch,
 )
 
 NAMES = ["a", "b", "c", "d"]
@@ -128,6 +129,33 @@ def test_feasibility_is_monotone_in_arbitrary_change(sem):
             vals.append(structural_feasibility_rate(x, x_cf, sem))
         rates.append(float(np.mean(vals)))
     assert rates == sorted(rates, reverse=True), f"not monotone: {rates}"
+
+
+def test_batch_matches_per_row(sem):
+    """The vectorised path used inside NSGA-II must agree with the scalar one exactly."""
+    rng = np.random.default_rng(7)
+    x = np.array([1.0, 2.0, -3.0, 0.5])
+    X_cf = x + rng.normal(scale=2.0, size=(64, len(NAMES)))
+
+    batch = structural_violation_batch(x, X_cf, sem)
+    single = np.array([structural_violation(x, row, sem) for row in X_cf])
+    assert np.allclose(batch, single)
+
+
+def test_batch_handles_single_row(sem):
+    x = np.array([1.0, 2.0, -3.0, 0.5])
+    x_cf = x + 3.0
+    assert structural_violation_batch(x, x_cf, sem)[0] == pytest.approx(
+        structural_violation(x, x_cf, sem)
+    )
+
+
+def test_batch_empty_dag():
+    g = nx.DiGraph()
+    g.add_nodes_from(NAMES)
+    sem_empty = fit_structural_equations(_scm_sample(), g, NAMES)
+    X = np.zeros((5, len(NAMES)))
+    assert np.allclose(structural_violation_batch(np.zeros(len(NAMES)), X, sem_empty), 0.0)
 
 
 def test_empty_dag_is_feasible():

@@ -26,11 +26,26 @@ def feasibility(
     dag: nx.DiGraph,
     feature_names: list[str],
 ) -> float:
-    """
-    Fraction of DAG edges violated by the counterfactual.
-    Violated = exactly one endpoint of a causal edge changes.  A changed child
-    without its parent is unsupported; a changed parent without updating the
-    child is also structurally inconsistent in the absence of an SEM update.
+    """Fraction of DAG edges violated by the counterfactual (co-change criterion).
+
+    Violated = exactly one endpoint of a causal edge changes.
+
+    DEPRECATED for new work; retained to reproduce previously published runs.
+    The criterion is degenerate: it is satisfied both when nothing changes and
+    when every feature changes (all edges then have both endpoints changed), and
+    is worst in between -- on the 41-node NF-DAG-v1 it scores 1.000 at 0/41 and
+    41/41 changed features and 0.512 at 20/41. A search maximising it is
+    therefore driven towards changing every feature, which is the opposite of
+    the minimal recourse a counterfactual is meant to describe.
+
+    It is also unsuitable for comparing two candidate graphs, since each is
+    scored against itself: a random graph connects features with no reason to
+    co-move and so is intrinsically harder to satisfy, regardless of whether it
+    is causally correct.
+
+    Use ``structural.structural_violation`` instead, and
+    ``plausibility.plausibility_rate`` for graph-independent comparison.
+
     0.0 = fully feasible; 1.0 = all edges violated. Objective: minimise.
     """
     n_edges = dag.number_of_edges()

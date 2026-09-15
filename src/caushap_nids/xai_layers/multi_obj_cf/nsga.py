@@ -7,7 +7,7 @@ import networkx as nx
 import numpy as np
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.mutation import Mutation
-from pymoo.core.problem import ElementwiseProblem
+from pymoo.core.problem import Problem
 from pymoo.core.sampling import Sampling
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.sampling.rnd import FloatRandomSampling
@@ -17,7 +17,11 @@ from .feasibility import dag_respecting_mutation
 from .objectives import feasibility as _co_change_violation
 from .objectives import proximity, sparsity
 from .objectives import validity as _validity
-from .structural import StructuralEquations, structural_violation
+from .structural import (
+    StructuralEquations,
+    structural_violation,
+    structural_violation_batch,
+)
 
 
 def _feasibility(
@@ -83,8 +87,14 @@ def _soft_validity_obj(x_cf: np.ndarray, detector, threshold: float) -> float:
     return (score - threshold) / max(threshold, 1e-9)
 
 
-class _CFProblem(ElementwiseProblem):
-    """4-objective NSGA-II problem: minimise [soft_validity, proximity, sparsity, feas_violations]."""
+class _CFProblem(Problem):
+    """4-objective NSGA-II problem: minimise [soft_validity, proximity, sparsity, feas_violations].
+
+    Evaluated over the whole population at once.  Element-wise evaluation issued
+    one detector call per individual -- pop_size * n_gen single-row calls per
+    anchor -- and single-row scoring is where an Isolation Forest spends almost
+    all of its time.  Batching leaves the objectives identical.
+    """
 
     def __init__(self, x_orig, detector, dag, feature_names, threshold, xl, xu, sem=None):
         super().__init__(n_var=len(x_orig), n_obj=4, xl=xl, xu=xu)
@@ -95,12 +105,28 @@ class _CFProblem(ElementwiseProblem):
         self.threshold = threshold
         self.sem = sem
 
-    def _evaluate(self, x_cf, out, *args, **kwargs):
-        v_soft = _soft_validity_obj(x_cf, self.detector, self.threshold)
-        p = proximity(self.x_orig, x_cf)
-        s = sparsity(self.x_orig, x_cf)
-        f = _feasibility(self.x_orig, x_cf, self.dag, self.feature_names, self.sem)
-        out["F"] = [v_soft, p, s, f]
+    def _evaluate(self, X, out, *args, **kwargs):
+        X = np.atleast_2d(np.asarray(X, dtype=np.float64))
+        diff = np.abs(X - self.x_orig)
+
+        scores = np.asarray(self.detector.score(X), dtype=np.float64).ravel()
+        v_soft = np.where(
+            scores < self.threshold,
+            0.0,
+            (scores - self.threshold) / max(self.threshold, 1e-9),
+        )
+        p = diff.sum(axis=1)
+        s = (diff > 1e-6).sum(axis=1).astype(np.float64)
+
+        if self.sem is not None:
+            f = structural_violation_batch(self.x_orig, X, self.sem)
+        else:
+            f = np.array([
+                _co_change_violation(self.x_orig, row, self.dag, self.feature_names)
+                for row in X
+            ])
+
+        out["F"] = np.column_stack([v_soft, p, s, f])
 
 
 class _WarmStartSampling(Sampling):

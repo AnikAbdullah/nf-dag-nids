@@ -855,10 +855,31 @@ def _empty_feature_dag(feature_names: list[str]) -> Any:
 
 
 def _evaluate_cfs_against_dag(cfs: list[Any], dag: Any, feature_names: list[str]) -> None:
+    """Rescore each counterfactual's feasibility against ``dag``, in place.
+
+    Used for the random-DAG control, whose counterfactuals are searched under a
+    random structure but scored against the expert graph so that both arms share
+    one yardstick. Note what that comparison does and does not show: the control
+    is graded on constraints it was not given, so the resulting gap reflects the
+    mismatch between the search objective and the scoring graph as well as any
+    difference in the quality of the graphs. ``_mean_feasibility_against`` keeps
+    the own-graph number so both readings can be reported.
+    """
     from caushap_nids.xai_layers.multi_obj_cf.objectives import feasibility as _feasibility
 
     for cf in cfs:
         cf.feasibility_rate = 1.0 - _feasibility(cf.x_orig, cf.x_cf, dag, feature_names)
+
+
+def _mean_feasibility_against(cfs: list[Any], dag: Any, feature_names: list[str]) -> float:
+    """Mean feasibility of ``cfs`` against ``dag``, without mutating them."""
+    from caushap_nids.xai_layers.multi_obj_cf.objectives import feasibility as _feasibility
+
+    if not cfs:
+        return float("nan")
+    return float(
+        np.mean([1.0 - _feasibility(cf.x_orig, cf.x_cf, dag, feature_names) for cf in cfs])
+    )
 
 
 def _select_explanation_indices(
@@ -1169,14 +1190,25 @@ def run_single(
 
             eval_dag = generation_dag
             eval_dag_name = "configured"
+            # Feasibility against the graph the search actually optimised for.
+            # Recorded before any rescoring so both readings survive.
+            feas_own_graph = _mean_feasibility_against(
+                all_cfs, generation_dag, NF_V2_FEATURE_COLS
+            )
+            feas_expert_graph = float("nan")
             if cfg.dag and cfg.dag.get("random", False):
                 expert_dag = _load_expert_dag(artifact_dir)
                 if expert_dag is not None:
                     eval_dag = expert_dag
                     eval_dag_name = "expert_nf_dag_v1"
+                    feas_expert_graph = _mean_feasibility_against(
+                        all_cfs, expert_dag, NF_V2_FEATURE_COLS
+                    )
                     _evaluate_cfs_against_dag(all_cfs, eval_dag, NF_V2_FEATURE_COLS)
 
             cf_result = aggregate_cf_metrics(all_cfs)
+            cf_result["feasibility_rate_own_graph"] = feas_own_graph
+            cf_result["feasibility_rate_expert_graph"] = feas_expert_graph
             cf_result["hypervolume"] = float(np.mean(front_hypervolumes)) if front_hypervolumes else 0.0
             cf_result["total_hypervolume"] = cf_hypervolume(all_cfs)
             cf_result["method"] = cf_method
