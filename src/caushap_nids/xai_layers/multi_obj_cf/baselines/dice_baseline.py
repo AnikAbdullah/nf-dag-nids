@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import warnings
 
-import numpy as np
 import networkx as nx
+import numpy as np
 import pandas as pd
 
 try:
@@ -16,7 +16,6 @@ from ..nsga import CounterfactualExplanation
 from ..objectives import feasibility as _feasibility
 from ..objectives import proximity, sparsity
 from ..objectives import validity as _validity
-
 
 # Temperature applied to the AE-score logit so the sigmoid is not flat near
 # the operating threshold. Gives DiCE's genetic optimiser usable gradient.

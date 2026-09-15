@@ -3,9 +3,8 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 
-import numpy as np
 import networkx as nx
-
+import numpy as np
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.mutation import Mutation
 from pymoo.core.problem import ElementwiseProblem
@@ -15,9 +14,29 @@ from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.optimize import minimize
 
 from .feasibility import dag_respecting_mutation
-from .objectives import feasibility as _feasibility
+from .objectives import feasibility as _co_change_violation
 from .objectives import proximity, sparsity
 from .objectives import validity as _validity
+from .structural import StructuralEquations, structural_violation
+
+
+def _feasibility(
+    x_orig: np.ndarray,
+    x_cf: np.ndarray,
+    dag: nx.DiGraph,
+    feature_names: list[str],
+    sem: StructuralEquations | None = None,
+) -> float:
+    """Feasibility violation, minimised. Structural when a fitted SEM is supplied.
+
+    Without a SEM this falls back to the co-change criterion, which is retained
+    only to reproduce previously published runs: it is maximised both by
+    changing nothing and by changing every feature, so a search optimising it
+    drives sparsity up to the feature count. Pass ``sem`` for new work.
+    """
+    if sem is not None:
+        return structural_violation(x_orig, x_cf, sem)
+    return _co_change_violation(x_orig, x_cf, dag, feature_names)
 
 
 @dataclass
@@ -67,19 +86,20 @@ def _soft_validity_obj(x_cf: np.ndarray, detector, threshold: float) -> float:
 class _CFProblem(ElementwiseProblem):
     """4-objective NSGA-II problem: minimise [soft_validity, proximity, sparsity, feas_violations]."""
 
-    def __init__(self, x_orig, detector, dag, feature_names, threshold, xl, xu):
+    def __init__(self, x_orig, detector, dag, feature_names, threshold, xl, xu, sem=None):
         super().__init__(n_var=len(x_orig), n_obj=4, xl=xl, xu=xu)
         self.x_orig = x_orig
         self.detector = detector
         self.dag = dag
         self.feature_names = feature_names
         self.threshold = threshold
+        self.sem = sem
 
     def _evaluate(self, x_cf, out, *args, **kwargs):
         v_soft = _soft_validity_obj(x_cf, self.detector, self.threshold)
         p = proximity(self.x_orig, x_cf)
         s = sparsity(self.x_orig, x_cf)
-        f = _feasibility(self.x_orig, x_cf, self.dag, self.feature_names)
+        f = _feasibility(self.x_orig, x_cf, self.dag, self.feature_names, self.sem)
         out["F"] = [v_soft, p, s, f]
 
 
@@ -110,6 +130,34 @@ class _WarmStartSampling(Sampling):
         return np.vstack([warm, uniform])
 
 
+def _select_representative(
+    cfs: list[CounterfactualExplanation], n: int
+) -> list[CounterfactualExplanation]:
+    """Pick n knee-point counterfactuals: closest to the ideal corner of the front.
+
+    Each objective is min-max normalised across the front before distances are
+    taken, so no single objective dominates the choice.  The earlier lexicographic
+    sort ranked feasibility ahead of sparsity, which — combined with the co-change
+    criterion's preference for changing everything — meant the reported
+    counterfactual was systematically the least actionable point on the front.
+    """
+    if len(cfs) <= n:
+        return cfs
+
+    # Objectives, all "lower is better".
+    obj = np.array(
+        [
+            [1.0 - cf.validity, cf.proximity, float(cf.sparsity), 1.0 - cf.feasibility_rate]
+            for cf in cfs
+        ],
+        dtype=np.float64,
+    )
+    lo, hi = obj.min(axis=0), obj.max(axis=0)
+    span = np.where(hi - lo > 1e-12, hi - lo, 1.0)
+    dist = np.linalg.norm((obj - lo) / span, axis=1)
+    return [cfs[i] for i in np.argsort(dist)[:n]]
+
+
 def _binary_dominates(a: CounterfactualExplanation, b: CounterfactualExplanation) -> bool:
     """Pareto dominance using binary validity (the externally-visible form)."""
     obj_a = np.array([1.0 - a.validity, a.proximity, float(a.sparsity), 1.0 - a.feasibility_rate])
@@ -133,11 +181,12 @@ def _as_cf_result(
     dag: nx.DiGraph,
     feature_names: list[str],
     threshold: float,
+    sem: StructuralEquations | None = None,
 ) -> CounterfactualExplanation:
     v = _validity(x_cf, detector, threshold)
     p = proximity(x_orig, x_cf)
     s = int(round(sparsity(x_orig, x_cf)))
-    feas = 1.0 - _feasibility(x_orig, x_cf, dag, feature_names)
+    feas = 1.0 - _feasibility(x_orig, x_cf, dag, feature_names, sem)
     changed = [feature_names[i] for i in range(len(x_orig)) if abs(x_cf[i] - x_orig[i]) > 1e-6]
     return CounterfactualExplanation(
         x_orig=x_orig.copy(),
@@ -157,6 +206,7 @@ def _sparsify_valid_cf(
     dag: nx.DiGraph,
     feature_names: list[str],
     threshold: float,
+    sem: StructuralEquations | None = None,
 ) -> np.ndarray:
     """Greedily remove unnecessary changes from a valid CF without hurting feasibility."""
     current = np.asarray(x_cf, dtype=np.float64).copy()
@@ -164,12 +214,12 @@ def _sparsify_valid_cf(
     if _validity(current, detector, threshold) < 1.0:
         return current
 
-    max_violation = _feasibility(x_orig, current, dag, feature_names)
+    max_violation = _feasibility(x_orig, current, dag, feature_names, sem)
 
     def _acceptable(candidate: np.ndarray) -> bool:
         return (
             _validity(candidate, detector, threshold) == 1.0
-            and _feasibility(x_orig, candidate, dag, feature_names) <= max_violation + 1e-12
+            and _feasibility(x_orig, candidate, dag, feature_names, sem) <= max_violation + 1e-12
         )
 
     changed = np.flatnonzero(np.abs(current - x_orig) > 1e-6)
@@ -178,7 +228,7 @@ def _sparsify_valid_cf(
         candidate[idx] = x_orig[idx]
         if _acceptable(candidate):
             current = candidate
-            max_violation = _feasibility(x_orig, current, dag, feature_names)
+            max_violation = _feasibility(x_orig, current, dag, feature_names, sem)
 
     changed = np.flatnonzero(np.abs(current - x_orig) > 1e-6)
     for idx in changed:
@@ -215,6 +265,8 @@ def generate_cf_pareto_front(
     warm_frac: float = 0.3,
     return_valid_only: bool = False,
     n_cfs: int | None = None,
+    sem: StructuralEquations | None = None,
+    selection: str = "knee",
 ) -> list[CounterfactualExplanation]:
     """
     Main entry point for Layer B.
@@ -223,6 +275,13 @@ def generate_cf_pareto_front(
     threshold is mandatory — pass the detector's operating decision threshold.
     background: if provided, warm_frac of the initial population is seeded from
         actual benign rows so NSGA-II starts inside the valid region.
+    sem: structural equations fitted on benign traffic (see ``structural.py``).
+        When supplied, feasibility is the causal-recourse criterion; when None it
+        falls back to the legacy co-change criterion, which is kept only for
+        reproducing previously published runs.
+    selection: how to reduce the front to ``n_cfs`` points. "knee" (default)
+        takes the points nearest the ideal corner after normalising each
+        objective; "feasibility_first" reproduces the legacy lexicographic sort.
     """
     if threshold is None:
         raise ValueError(
@@ -245,7 +304,7 @@ def generate_cf_pareto_front(
     else:
         sampler = FloatRandomSampling()
 
-    problem = _CFProblem(x, detector, dag, feature_names, threshold, xl, xu)
+    problem = _CFProblem(x, detector, dag, feature_names, threshold, xl, xu, sem)
     algorithm = NSGA2(
         pop_size=population_size,
         sampling=sampler,
@@ -270,8 +329,8 @@ def generate_cf_pareto_front(
     results: list[CounterfactualExplanation] = []
 
     for x_cf in X_sols:
-        x_cf = _sparsify_valid_cf(x, x_cf, detector, dag, feature_names, threshold)
-        results.append(_as_cf_result(x, x_cf, detector, dag, feature_names, threshold))
+        x_cf = _sparsify_valid_cf(x, x_cf, detector, dag, feature_names, threshold, sem)
+        results.append(_as_cf_result(x, x_cf, detector, dag, feature_names, threshold, sem))
 
     if return_valid_only:
         valid = [cf for cf in results if cf.validity == 1.0]
@@ -280,8 +339,12 @@ def generate_cf_pareto_front(
 
     results = _prune_dominated(results)
     if n_cfs is not None and n_cfs > 0:
-        results = sorted(
-            results,
-            key=lambda cf: (-cf.validity, -cf.feasibility_rate, cf.sparsity, cf.proximity),
-        )[:n_cfs]
+        if selection == "feasibility_first":
+            results = sorted(
+                results,
+                key=lambda cf: (-cf.validity, -cf.feasibility_rate, cf.sparsity, cf.proximity),
+            )[:n_cfs]
+        else:
+            valid = [cf for cf in results if cf.validity == 1.0] or results
+            results = _select_representative(valid, n_cfs)
     return results

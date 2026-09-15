@@ -8,7 +8,7 @@ from .pareto import dominates, hypervolume
 
 __all__ = [
     "CounterfactualExplanation",
-    "generate_cf_pareto_front",
     "dominates",
+    "generate_cf_pareto_front",
     "hypervolume",
 ]

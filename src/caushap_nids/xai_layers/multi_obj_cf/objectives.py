@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import numpy as np
 import networkx as nx
+import numpy as np
 
 
 def validity(x_cf: np.ndarray, detector, threshold: float) -> float:

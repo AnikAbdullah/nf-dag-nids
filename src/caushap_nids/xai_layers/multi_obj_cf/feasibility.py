@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import numpy as np
 import networkx as nx
+import numpy as np
 
 
 def dag_respecting_mutation(
