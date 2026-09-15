@@ -25,5 +25,10 @@ _handoff/
 !README.md
 plans/
 
+# Manuscript working area: the paper under submission, third-party journal
+# templates (Wiley .cls/.sty and bundled licensed fonts), and downloaded
+# copyrighted articles. None of this belongs in a public code repository.
+Journal exchange/
+
 # Local-only Claude Code settings
 .claude/settings.local.json
